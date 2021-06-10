@@ -26,17 +26,17 @@ us_states <- tigris::states(cb=TRUE) %>%
 # Create bounding box per state
 us_states <- cbind(us_states, sapply(us_states$geometry, st_bbox) %>% t())
 
-# Step 2: Get List Feeds + Metadata ---------------------------------------
-
+# Step 2: Query Available Feeds  ---------------------------------------
 
 #' Gets gtfs feeds inside a state's bounding box from TransitLand
-query_onestop_ids <- function(xmin, ymin, xmax, ymax) {
+query_gtfs_urls <- function(xmin, ymin, xmax, ymax) {
   feed_locations_url <- "https://transit.land/api/v1/feeds?per_page=5"
   bbox_querystring <- paste0("bbox=",
                              xmin, ",", ymin, ",",
                              xmax, ",", ymax)
   query_url <- paste0(feed_locations_url, "&", bbox_querystring)
-  feed_onestop_ids <- c()
+
+    feed_gtfs_urls <- c()
   # Feeds results are paginated so we need to make multiple API requests
   while (!is.null(query_url)) {
     # Wait a few seconds to avoid rate limits?
@@ -46,32 +46,54 @@ query_onestop_ids <- function(xmin, ymin, xmax, ymax) {
     feed_locations_json <- tryCatch(jsonlite::read_json(query_url),
                                     error=function(e){print(e);NULL})
     if (is.null(feed_locations_json)){
-      return(feed_onestop_ids);
+      return(feed_gtfs_urls);
     }
     for (feed in feed_locations_json$feeds){
       inner_feed <- feed %>% flatten()
       if (inner_feed$feed_format == "gtfs") {
-        feed_onestop_ids <- append(feed_onestop_ids, inner_feed$onestop_id)
+        feed_gtfs_urls <- append(feed_gtfs_urls, inner_feed$url)
       }
     }
     query_url <- feed_locations_json$meta[['next']]
   }
-  feed_onestop_ids
+  return(feed_gtfs_urls)
 }
 
+# Step 3: Download Feeds  ---------------------------------------
 
-# Create list to hold feeds
-onestop_ids <- c()
-# TODO: Refactor to tidy-style now that the function is safe
+# Make directory for new feeds
+R.utils::mkdirs("input/shared/feeds/transitland")
+
 for (idx in 1:nrow(us_states)) {
   xmin <- us_states$xmin[idx]
   ymin <- us_states$ymin[idx]
   xmax <- us_states$xmax[idx]
   ymax <- us_states$ymax[idx]
-  onestop_ids <- append(onestop_ids, query_onestop_ids(xmin,ymin,xmax,ymax))
+  state_path <- file.path("input/shared/feeds/transitland",
+                          us_states$STUSPS[idx])
+  if (!file.exists(state_path)) {
+    R.utils::mkdirs(state_path)
+  }
+
+  url_list_path <- file.path(state_path, "gtfs_urls.txt")
+  if (file.exists(url_list_path)) {
+    print(paste("Reading cached state", us_states$STUSPS[idx]))
+    state_gtfs_urls <- readr::read_lines(url_list_path)
+  } else {
+    print(paste("Querying for state", us_states$STUSPS[idx]))
+    state_gtfs_urls <- query_gtfs_urls(xmin,ymin,xmax,ymax)
+    readr::write_lines(state_gtfs_urls, url_list_path)
+  }
+  for (gtfs_url in state_gtfs_urls) {
+    if (is.null(gtfs_url)) {next;}
+    feed_path <- file.path(state_path,basename(gtfs_url))
+    if (!file.exists(feed_path)) {
+      print(paste("Downloading", basename(gtfs_url)))
+      tryCatch(curl::curl_download(gtfs_url, feed_path),
+               error=function(e){print(e);NULL})
+    }
+  }
 }
-# state_feeds <- us_states %>% mutate(feeds = query_onestop_ids(xmin,ymin,xmax,ymax))
 
-# Step 3: Get GTFS  ---------------------------------------
-
-# TODO ... for each onestop_id, GET /api/v1/feeds/<onestop_id>
+## TODO: Replace TransitFeeds file locations
+## TODO: Link files to shared folder
